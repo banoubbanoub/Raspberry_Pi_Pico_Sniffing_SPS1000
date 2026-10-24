@@ -1,0 +1,8 @@
+.program stn_sniff
+; Waits for XSCL clock edge, reads 4 data pins, and pushes to RX FIFO via DMA
+.wrap_target
+    wait 0 pin 0        ; Wait for XSCL falling edge (adjust to 1 for rising)
+    in pins, 4          ; Read 4 parallel data bits into input shift register
+    push noblock        ; Push sample immediately to FIFO (consumed by DMA)
+    wait 1 pin 0        ; Wait for XSCL return edge to prevent re-triggering on same pulse
+.wrap
