@@ -83,6 +83,48 @@ The capture implementation includes PIO sampling, circular DMA buffering, line t
 
 This project captures digital display signals directly from vintage hardware. Verify signal voltage levels and electrical compatibility before connecting a microcontroller. Use appropriate level shifting or buffering when required, and avoid loading the original display controller outputs.
 
+Complete System Circuit Diagram
+================================================================================
+ 1. POWER SUPPLY SECTION
+================================================================================
+Samsung SPS 1000                          Buck Converter (HW-045 / LM2596 type)
+ [ 5V Pin ] ─────────────────────────────> [ VIN+ ]
+ [ GND    ] ─────────────────────────────> [ VIN- ]
+
+                                          [ VOUT+ ] ──+──> 3.3V Rail (Pico 3V3)
+                                          [ VOUT- ] ──+──> Common Ground (GND)
+
+================================================================================
+ 2. LEVEL SHIFTER SECTION (e.g., 20-Pin DIP 74LVC245 / 74HCT245)
+================================================================================
+SPS 1000 Signals (5V Logic)               Level Shifter IC                  Pico (3.3V Logic)
+ [ Data 0 ] ─────────────────────────────> Pin 2 [A1] ──> [B1] Pin 18 ──────> GPIO 0
+ [ Data 1 ] ─────────────────────────────> Pin 3 [A2] ──> [B2] Pin 17 ──────> GPIO 1
+ [ Data 2 ] ─────────────────────────────> Pin 4 [A3] ──> [B3] Pin 16 ──────> GPIO 2
+ [ Data 3 ] ─────────────────────────────> Pin 5 [A4] ──> [B4] Pin 15 ──────> GPIO 3
+ [ XSCL   ] ─────────────────────────────> Pin 6 [A5] ──> [B5] Pin 14 ──────> GPIO 4
+ [ LP     ] ─────────────────────────────> Pin 7 [A6] ──> [B6] Pin 13 ──────> GPIO 8
+ [ YD     ] ─────────────────────────────> Pin 8 [A7] ──> [B7] Pin 12 ──────> GPIO 9
+
+ * Power & Control Connections for Level Shifter:
+   - Pin 20 [VCC]  ──> 5V Rail (from SPS 1000 / Buck VIN+)
+   - Pin 10 [GND]  ──> Common Ground
+   - Pin 1  [DIR]  ──> 5V Rail (Direction: A -> B)
+   - Pin 19 [OE/]  ──> Common Ground (Output Enabled)
+   - Low-side VCCA (if dual-supply like TXS0108E) ──> 3.3V Rail
+
+================================================================================
+ 3. RASPBERRY PI PICO & VGA OUTPUT SECTION
+================================================================================
+Raspberry Pi Pico                         VGA DB15 Connector
+ [ GPIO 16 ] ───────────────────────────> Pin 13 (HSYNC)
+ [ GPIO 17 ] ───────────────────────────> Pin 14 (VSYNC)
+ [ GPIO 18 ] ──[ 270Ω Resistor ]────────> Pin 2  (Green Video Out)
+
+ [ GND     ] ──┬────────────────────────> Pins 5, 6, 7, 8, 10 (Analog Grounds)
+               └────────────────────────> VGA Shell / Chassis Ground
+================================================================================
+
 ## Conclusion
 
 This project explores the intersection of retrocomputing, digital electronics, and embedded systems.
