@@ -3,6 +3,20 @@
 #include "hardware/irq.h"
 #include "hardware/pio_instructions.h"
 
+/*
+ * Monochrome VGA output: 640x480 at 60 Hz.
+ * A 126 MHz system clock feeds two state machines on PIO0:
+ * - Sync SM runs at 25.2 MHz and generates an 800-clock horizontal line.
+ * - Video SM runs at 50.4 MHz; OUT + JMP emit one pixel every two cycles.
+ * At each line start, PIO flag 1 requests CPU preparation of the scanline.
+ * The CPU updates VSYNC and packs 80 framebuffer bytes into 20 pixel words.
+ * DMA sends a count word (639), followed by those 20 words, to the video FIFO.
+ * After HSYNC and the back porch, PIO flag 0 releases the video SM.
+ * It outputs 640 pixels, then forces video low until the next active interval.
+ * Each frame contains 480 visible lines and 45 vertical blanking lines.
+ * STN capture is separate on PIO1; this driver only reads the VGA framebuffer.
+ */
+
 VGA_class VGA;
 
 static uint16_t vga_out_instructions[7];
@@ -16,7 +30,7 @@ static const pio_program vga_sync_program = {
     vga_sync_instructions, 10, -1
 };
 
-// Dynamic VRAM allocation fallback buffer
+// Statically allocated framebuffer, used when the caller supplies no external RAM.
 static uint8_t internal_vram[VGA_VRAM_SIZE] __attribute__((aligned(4)));
 
 // 640x480 at 60 Hz with a 25.2 MHz pixel clock.
@@ -41,6 +55,8 @@ VGA_class::VGA_class()
       blanking_start_hook(nullptr), blanking_end_hook(nullptr) {}
 
 static void __not_in_flash_func(vga_line_irq)() {
+    // Flag 1 is routed to the CPU; flag 0 is reserved for PIO-to-PIO timing.
+    // RAM-resident IRQ code avoids flash-fetch stalls during line preparation.
     if (pio_interrupt_get(pio0, 1)) {
         pio_interrupt_clear(pio0, 1);
         VGA.scanline_handler();
@@ -96,11 +112,14 @@ void __not_in_flash_func(VGA_class::scanline_handler)() {
         gpio_put(VGA_PIN_VSYNC, true);
     }
 
+    // The video OUT/JMP loop executes count + 1 times, so 639 emits 640 pixels.
     ordered_line[0] = H_ACTIVE - 1;
     if (current_line < V_ACTIVE) {
         const uint8_t* source = vram_front + (current_line * VGA_BYTES_PER_LINE);
         for (uint16_t word = 0; word < VGA_BYTES_PER_LINE / 4; ++word) {
             const uint16_t byte = word * 4;
+            // RP2040 is little-endian, but PIO shifts MSB first. Pack the first
+            // framebuffer byte into bits 31:24 to preserve left-to-right order.
             ordered_line[word + 1] =
                 (static_cast<uint32_t>(source[byte]) << 24) |
                 (static_cast<uint32_t>(source[byte + 1]) << 16) |
@@ -111,6 +130,8 @@ void __not_in_flash_func(VGA_class::scanline_handler)() {
     } else {
         memset(ordered_line + 1, 0, VGA_BYTES_PER_LINE);
     }
+    // Preparation and FIFO loading must finish before the active-video trigger.
+    // DREQ paces DMA writes so the CPU does not have to feed individual pixels.
     dma_channel_transfer_from_buffer_now(
         dma_chan, ordered_line, 1 + VGA_BYTES_PER_LINE / 4);
 
@@ -147,6 +168,7 @@ void VGA_class::begin(uint8_t* extram) {
     irq_set_priority(PIO0_IRQ_0, 0x40);
     pio_set_irq0_source_enabled(pio_instance, pis_interrupt1, true);
     irq_set_enabled(PIO0_IRQ_0, true);
+    // Start both clock dividers together to keep their timing relationship fixed.
     pio_enable_sm_mask_in_sync(pio_instance, (1u << sm_sync) | (1u << sm_video));
 }
 
@@ -183,6 +205,8 @@ void VGA_class::initGPIO() {
 void VGA_class::initPIO() {
     sm_video = pio_claim_unused_sm(pio_instance, true);
     sm_sync = pio_claim_unused_sm(pio_instance, true);
+    // Pull the count, wait for active video, emit the row, then blank the pin.
+    // WAIT on a set IRQ flag also clears it, ready for the next line trigger.
     vga_out_instructions[0] = pio_encode_pull(false, true);
     vga_out_instructions[1] = pio_encode_out(pio_x, 32);
     vga_out_instructions[2] = pio_encode_wait_irq(true, false, 0);
@@ -199,6 +223,8 @@ void VGA_class::initPIO() {
     sm_config_set_out_pins(&c, VGA_PIN_VIDEO, 1);
     sm_config_set_set_pins(&c, VGA_PIN_VIDEO, 1);
     
+    // Autopull loads another word after 32 shifted bits. Joining the TX FIFO
+    // provides eight words of buffering against DMA/bus arbitration delays.
     sm_config_set_out_shift(&c, false, true, 32);
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
 
@@ -209,6 +235,10 @@ void VGA_class::initPIO() {
     pio_sm_set_consecutive_pindirs(pio_instance, sm_video, VGA_PIN_VIDEO, 1, true);
     // 800 pixel-clock ticks per line: sync 96, back porch 48,
     // active 640, front porch 16. PIO timing is independent of CPU IRQ latency.
+    // Instructions 0..3 consume 96 clocks; 4..5 consume 47 more clocks.
+    // Instruction 6 signals active video at clock 143; the video SM then
+    // leaves WAIT and starts shifting. Instructions 6..9 consume 657 clocks.
+    // Each encoded delay adds cycles to the instruction's own one-cycle cost.
     vga_sync_instructions[0] = pio_encode_set(pio_pins, 0);
     vga_sync_instructions[1] = pio_encode_irq_set(false, 1);
     vga_sync_instructions[2] = pio_encode_set(pio_x, 2);
